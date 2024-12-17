@@ -29,6 +29,8 @@ struct private_eap_sim_pcsc_card_t {
 	 * Public eap_sim_pcsc_card_t interface.
 	 */
 	eap_sim_pcsc_card_t public;
+
+	char auts[AKA_AUTS_LEN];
 };
 
 /**
@@ -362,8 +364,240 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 	char rand[AKA_RAND_LEN], char autn[AKA_AUTN_LEN], char ck[AKA_CK_LEN],
 	char ik[AKA_IK_LEN], char res[AKA_RES_MAX], int *res_len)
 {
-	return NOT_SUPPORTED;
+	status_t found = FAILED;
+	LONG rv;
+	SCARDCONTEXT hContext;
+	DWORD dwReaders;
+	LPSTR mszReaders;
+	char *cur_reader;
+	char full_nai[128];
+	SCARDHANDLE hCard;
+	enum { DISCONNECTED, CONNECTED, TRANSACTION } hCard_status = DISCONNECTED;
+
+	snprintf(full_nai, sizeof(full_nai), "%Y", id);
+
+	DBG2(DBG_IKE, "looking for quintuplet: %Y\nrand %b\nautn %b", id, rand, AKA_RAND_LEN, autn, AKA_AUTN_LEN);
+
+	rv = SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL, &hContext);
+	if (rv != SCARD_S_SUCCESS)
+	{
+		DBG1(DBG_IKE, "SCardEstablishContext: %s", pcsc_stringify_error(rv));
+		return FAILED;
+	}
+
+	rv = SCardListReaders(hContext, NULL, NULL, &dwReaders);
+	if (rv != SCARD_S_SUCCESS)
+	{
+		DBG1(DBG_IKE, "SCardListReaders: %s", pcsc_stringify_error(rv));
+		return FAILED;
+	}
+	mszReaders = malloc(sizeof(char)*dwReaders);
+
+	rv = SCardListReaders(hContext, NULL, mszReaders, &dwReaders);
+	if (rv != SCARD_S_SUCCESS)
+	{
+		DBG1(DBG_IKE, "SCardListReaders: %s", pcsc_stringify_error(rv));
+		free(mszReaders);
+		return FAILED;
+	}
+
+	/* mszReaders is a multi-string of readers, separated by '\0' and
+	 * terminated by an additional '\0' */
+	for (cur_reader = mszReaders; *cur_reader != '\0' && found == FAILED;
+		 cur_reader += strlen(cur_reader) + 1)
+	{
+		DWORD dwActiveProtocol = -1;
+		const SCARD_IO_REQUEST *pioSendPci;
+		SCARD_IO_REQUEST pioRecvPci;
+		BYTE pbRecvBuffer[64];
+		DWORD dwRecvLength;
+
+		/* See GSM 11.11 for SIM APDUs */
+		static const BYTE pbSelectUSIM[] = { 0x00, 0xa4, 0x04, 0x04, 0x10, 0xa0, 0x00, 0x00, 0x00, 0x87, 0x10,
+						     0x02, 0xff, 0x49, 0x94, 0x20, 0x89, 0x03, 0x10, 0x00, 0x00 };
+		BYTE pbAuthenticate[6+AKA_RAND_LEN+1+AKA_AUTN_LEN] = { 0x00, 0x88, 0x00, 0x81, 0x22, 0x10 };
+		BYTE pbGetResponse[4+1] = { 0x00, 0xc0, 0x00, 0x00 };
+
+		/* If on 2nd or later reader, make sure we end the transaction
+		 * and disconnect card in the previous reader */
+		switch (hCard_status)
+		{
+			case TRANSACTION:
+				SCardEndTransaction(hCard, SCARD_LEAVE_CARD);
+				/* FALLTHRU */
+			case CONNECTED:
+				SCardDisconnect(hCard, SCARD_LEAVE_CARD);
+				/* FALLTHRU */
+			case DISCONNECTED:
+				hCard_status = DISCONNECTED;
+		}
+
+		/* Copy RAND + AUTN into APDU */
+		memcpy(pbAuthenticate + 6, rand, AKA_RAND_LEN);
+		pbAuthenticate[6 + AKA_RAND_LEN] = 0x10;
+		memcpy(pbAuthenticate + 6 + AKA_RAND_LEN + 1, autn, AKA_AUTN_LEN);
+
+		rv = SCardConnect(hContext, cur_reader, SCARD_SHARE_SHARED,
+			SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &hCard, &dwActiveProtocol);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardConnect: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		hCard_status = CONNECTED;
+
+		switch(dwActiveProtocol)
+		{
+			case SCARD_PROTOCOL_T0:
+				pioSendPci = SCARD_PCI_T0;
+				break;
+			case SCARD_PROTOCOL_T1:
+				pioSendPci = SCARD_PCI_T1;
+				break;
+			default:
+				DBG1(DBG_IKE, "Unknown SCARD_PROTOCOL");
+				continue;
+		}
+
+		/* Start transaction */
+		rv = SCardBeginTransaction(hCard);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardBeginTransaction: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		hCard_status = TRANSACTION;
+
+		/* APDU: Select USIM */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci, pbSelectUSIM, sizeof(pbSelectUSIM),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		if (dwRecvLength < APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != 97)
+		{
+			DBG1(DBG_IKE, "Select MF failed:\nsent %b\nreceived %b", pbSelectUSIM, sizeof(pbSelectUSIM),
+			     pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* APDU: Authenticate */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci,
+						   pbAuthenticate, sizeof(pbAuthenticate),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		if (dwRecvLength < APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != 97)
+		{
+			DBG1(DBG_IKE, "Authenticate failed:\nsent %b\nreceived %b", pbAuthenticate,
+			     sizeof(pbAuthenticate), pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Copy SW2 to GetResponse */
+		pbGetResponse[4] = pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN+1];
+
+		/* APDU: Get Response (of Authenticate) */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci, pbGetResponse, sizeof(pbGetResponse),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+
+		if (dwRecvLength < 1 + APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != APDU_SW1_SUCCESS)
+		{
+			DBG1(DBG_IKE, "Get Response failed:\nsent %b\nreceived %b", pbGetResponse,
+			     sizeof(pbGetResponse), pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Extract out AUTS and store it */
+		if (pbRecvBuffer[0] == 0xdc)
+		{
+			if (dwRecvLength < 2 + AKA_AUTS_LEN + APDU_STATUS_LEN) {
+				DBG1(DBG_IKE, "Get Response too short:\n%b", pbRecvBuffer, (u_int)dwRecvLength);
+				continue;
+			}
+			memcpy(this->auts, pbRecvBuffer + 2, AKA_AUTS_LEN);
+			DBG1(DBG_IKE, "Sync failure, storing AUTS %b", this->auts, AKA_AUTS_LEN);
+			/* This result code will trigger resync() function */
+			found = INVALID_STATE;
+			continue;
+		}
+
+		/* Extract out RES/CK/IK from response */
+		if (pbRecvBuffer[0] == 0xdb)
+		{
+			*res_len = pbRecvBuffer[1];
+			if (dwRecvLength < 2 + *res_len + 1 + AKA_CK_LEN + 1 + AKA_IK_LEN + APDU_STATUS_LEN) {
+				DBG1(DBG_IKE, "Get Response too short:\n%b", pbRecvBuffer, (u_int)dwRecvLength);
+				continue;
+			}
+			memcpy(res, pbRecvBuffer + 2, *res_len);
+			memcpy(ck, pbRecvBuffer + 2 + *res_len + 1, AKA_CK_LEN);
+			memcpy(ik, pbRecvBuffer + 2 + *res_len + 1 + AKA_CK_LEN + 1, AKA_IK_LEN);
+			DBG1(DBG_IKE, "Authentication success:\nRES %b\ncK %b\niK %b", res, *res_len, ck,
+			     AKA_CK_LEN, ik, AKA_IK_LEN);
+			found = SUCCESS;
+			continue;
+		}
+		else
+		{
+			DBG1(DBG_IKE, "Get Response unknown:\n%b", pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Transaction will be ended and card disconnected at the
+		 * beginning of this loop or after this loop */
+	}
+
+	/* Make sure we end any previous transaction and disconnect card */
+	switch (hCard_status)
+	{
+		case TRANSACTION:
+			SCardEndTransaction(hCard, SCARD_LEAVE_CARD);
+			/* FALLTHRU */
+		case CONNECTED:
+			SCardDisconnect(hCard, SCARD_LEAVE_CARD);
+			/* FALLTHRU */
+		case DISCONNECTED:
+			hCard_status = DISCONNECTED;
+	}
+
+	rv = SCardReleaseContext(hContext);
+	if (rv != SCARD_S_SUCCESS)
+	{
+		DBG1(DBG_IKE, "SCardReleaseContext: %s", pcsc_stringify_error(rv));
+	}
+
+	free(mszReaders);
+	return found;
 }
+
+METHOD(simaka_card_t, resync, bool,
+	private_eap_sim_pcsc_card_t *this, identification_t *id,
+	char rand[AKA_RAND_LEN], char auts[AKA_AUTS_LEN])
+{
+	/* AUTS */
+	memcpy(auts, this->auts, AKA_AUTS_LEN);
+	DBG3(DBG_IKE, "using AUTS:\n%b", auts, AKA_AUTS_LEN);
+
+	return TRUE;
+}
+
 
 METHOD(eap_sim_pcsc_card_t, destroy, void,
 	private_eap_sim_pcsc_card_t *this)
@@ -383,7 +617,7 @@ eap_sim_pcsc_card_t *eap_sim_pcsc_card_create()
 			.card = {
 				.get_triplet = _get_triplet,
 				.get_quintuplet = _get_quintuplet,
-				.resync = (void*)return_false,
+				.resync = _resync,
 				.get_pseudonym = (void*)return_null,
 				.set_pseudonym = (void*)nop,
 				.get_reauth = (void*)return_null,
