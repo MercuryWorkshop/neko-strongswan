@@ -409,14 +409,16 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 		DWORD dwActiveProtocol = -1;
 		const SCARD_IO_REQUEST *pioSendPci;
 		SCARD_IO_REQUEST pioRecvPci;
-		BYTE pbRecvBuffer[64];
+		BYTE pbRecvBuffer[128];
 		DWORD dwRecvLength;
+		int aid_length;
 
 		/* See GSM 11.11 for SIM APDUs */
-		static const BYTE pbSelectUSIM[] = { 0x00, 0xa4, 0x04, 0x04, 0x10, 0xa0, 0x00, 0x00, 0x00, 0x87, 0x10,
-						     0x02, 0xff, 0x49, 0x94, 0x20, 0x89, 0x03, 0x10, 0x00, 0x00 };
-		BYTE pbAuthenticate[6+AKA_RAND_LEN+1+AKA_AUTN_LEN] = { 0x00, 0x88, 0x00, 0x81, 0x22, 0x10 };
-		BYTE pbGetResponse[4+1] = { 0x00, 0xc0, 0x00, 0x00 };
+		static const BYTE pbSelectEFDIR[] = { 0x00, 0xa4, 0x00, 0x04, 0x02, 0x2f, 0x00, 0x00 };
+		static const BYTE pbSelectAID_prefix[] = { 0x00, 0xa4, 0x04, 0x04 };
+		static BYTE pbReadAID[4+1] = { 0x00, 0xb2, 0x01, 0x04 };
+		static BYTE pbAuthenticate[6+AKA_RAND_LEN+1+AKA_AUTN_LEN] = { 0x00, 0x88, 0x00, 0x81, 0x22, 0x10 };
+		static BYTE pbGetResponse[4+1] = { 0x00, 0xc0, 0x00, 0x00 };
 
 		/* If on 2nd or later reader, make sure we end the transaction
 		 * and disconnect card in the previous reader */
@@ -431,11 +433,6 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 			case DISCONNECTED:
 				hCard_status = DISCONNECTED;
 		}
-
-		/* Copy RAND + AUTN into APDU */
-		memcpy(pbAuthenticate + 6, rand, AKA_RAND_LEN);
-		pbAuthenticate[6 + AKA_RAND_LEN] = 0x10;
-		memcpy(pbAuthenticate + 6 + AKA_RAND_LEN + 1, autn, AKA_AUTN_LEN);
 
 		rv = SCardConnect(hContext, cur_reader, SCARD_SHARE_SHARED,
 			SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &hCard, &dwActiveProtocol);
@@ -468,9 +465,9 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 		}
 		hCard_status = TRANSACTION;
 
-		/* APDU: Select USIM */
+		/* APDU: Select EF.DIR */
 		dwRecvLength = sizeof(pbRecvBuffer);
-		rv = SCardTransmit(hCard, pioSendPci, pbSelectUSIM, sizeof(pbSelectUSIM),
+		rv = SCardTransmit(hCard, pioSendPci, pbSelectEFDIR, sizeof(pbSelectEFDIR),
 						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
 		if (rv != SCARD_S_SUCCESS)
 		{
@@ -480,10 +477,80 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 		if (dwRecvLength < APDU_STATUS_LEN ||
 			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != 97)
 		{
-			DBG1(DBG_IKE, "Select MF failed:\nsent %b\nreceived %b", pbSelectUSIM, sizeof(pbSelectUSIM),
+			DBG1(DBG_IKE, "Select EF.DIR failed:\nsent %b\nreceived %b", pbSelectEFDIR, sizeof(pbSelectEFDIR),
 			     pbRecvBuffer, (u_int)dwRecvLength);
 			continue;
 		}
+
+		/* Copy SW2 to GetResponse */
+		pbGetResponse[4] = pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN+1];
+
+		/* APDU: Get Response (of Select EF.DIR) */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci, pbGetResponse, sizeof(pbGetResponse),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+
+		if (dwRecvLength < 1 + APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != APDU_SW1_SUCCESS)
+		{
+			DBG1(DBG_IKE, "Get Response failed:\nsent %b\nreceived %b", pbGetResponse,
+			     sizeof(pbGetResponse), pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Copy record lenth */
+		pbReadAID[4] = pbRecvBuffer[7];
+
+		/* APDU: Read first AID */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci, pbReadAID, sizeof(pbReadAID),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		if (dwRecvLength < APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != APDU_SW1_SUCCESS)
+		{
+			DBG1(DBG_IKE, "Read of AID failed:\nsent %b\nreceived %b", pbReadAID, sizeof(pbReadAID),
+			     pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Copy AID */
+		aid_length = pbRecvBuffer[3];
+		BYTE pbSelectAID[4+1+aid_length];
+		memcpy(pbSelectAID, pbSelectAID_prefix, 4);
+		pbSelectAID[4] = aid_length;
+		memcpy(pbSelectAID+4+1, pbRecvBuffer+4, aid_length);
+
+		/* APDU: Select AID */
+		dwRecvLength = sizeof(pbRecvBuffer);
+		rv = SCardTransmit(hCard, pioSendPci, pbSelectAID, sizeof(pbSelectAID),
+						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
+		if (rv != SCARD_S_SUCCESS)
+		{
+			DBG1(DBG_IKE, "SCardTransmit: %s", pcsc_stringify_error(rv));
+			continue;
+		}
+		if (dwRecvLength < APDU_STATUS_LEN ||
+			pbRecvBuffer[dwRecvLength-APDU_STATUS_LEN] != 97)
+		{
+			DBG1(DBG_IKE, "Select ADF.USIM failed:\nsent %b\nreceived %b", pbSelectAID, sizeof(pbSelectAID),
+			     pbRecvBuffer, (u_int)dwRecvLength);
+			continue;
+		}
+
+		/* Copy RAND + AUTN into APDU */
+		memcpy(pbAuthenticate + 6, rand, AKA_RAND_LEN);
+		pbAuthenticate[6 + AKA_RAND_LEN] = 0x10;
+		memcpy(pbAuthenticate + 6 + AKA_RAND_LEN + 1, autn, AKA_AUTN_LEN);
 
 		/* APDU: Authenticate */
 		dwRecvLength = sizeof(pbRecvBuffer);
