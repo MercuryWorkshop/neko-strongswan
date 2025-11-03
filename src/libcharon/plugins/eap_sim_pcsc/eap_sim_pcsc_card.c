@@ -414,7 +414,7 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 		int aid_length;
 
 		/* See GSM 11.11 for SIM APDUs */
-		static const BYTE pbSelectEFDIR[] = { 0x00, 0xa4, 0x00, 0x04, 0x02, 0x2f, 0x00, 0x00 };
+		static const BYTE pbSelectEFDIR[] = { 0x00, 0xa4, 0x08, 0x04, 0x02, 0x2f, 0x00, 0x00 };
 		static const BYTE pbSelectAID_prefix[] = { 0x00, 0xa4, 0x04, 0x04 };
 		static BYTE pbReadAID[4+1] = { 0x00, 0xb2, 0x01, 0x04 };
 		static BYTE pbAuthenticate[6+AKA_RAND_LEN+1+AKA_AUTN_LEN] = { 0x00, 0x88, 0x00, 0x81, 0x22, 0x10 };
@@ -465,7 +465,9 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 		}
 		hCard_status = TRANSACTION;
 
-		/* APDU: Select EF.DIR */
+		/* APDU: Select EF.DIR
+		 * the SIM has not been reset, an unknown file is selected at this point
+		 * so do the first SELECT by path referencing (P1 = 0x08) */
 		dwRecvLength = sizeof(pbRecvBuffer);
 		rv = SCardTransmit(hCard, pioSendPci, pbSelectEFDIR, sizeof(pbSelectEFDIR),
 						   &pioRecvPci, pbRecvBuffer, &dwRecvLength);
