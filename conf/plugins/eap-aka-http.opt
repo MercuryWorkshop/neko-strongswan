@@ -1,0 +1,10 @@
+charon.plugins.eap-aka-http.server = unix:/run/nekoims/simcard.sock
+	USIM-https-server compatible service to query.
+
+	Service implementing the USIM-https-server API (_GET /?type=imsi_ and
+	_GET /?type=rand-autn&rand=..&autn=.._), such as the NekoIMS simcard-server.
+	Either _unix:/path/to/socket_ or _http://host[:port][/path]_. TLS is not
+	supported.
+
+charon.plugins.eap-aka-http.timeout = 5
+	Timeout in seconds for requests to the service.
