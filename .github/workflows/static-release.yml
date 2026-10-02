@@ -1,0 +1,108 @@
+name: Static release
+
+# Builds the static, monolithic charon used by the NekoIMS ePDG dialer for
+# x86_64 and arm64 Linux (musl, so it runs on any distro) and attaches the
+# tarballs to a GitHub release for tags matching nekoims-*. Manual runs only
+# keep the tarballs as workflow artifacts.
+
+on:
+  push:
+    tags:
+      - 'nekoims-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ALPINE_IMAGE: alpine:3.22
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Plain docker run rather than a job container: JavaScript actions
+      # don't run in Alpine containers on arm64 runners.
+      - name: Build in Alpine
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e VERSION \
+            -e HOST_IDS="$(id -u):$(id -g)" "$ALPINE_IMAGE" sh -euc '
+              apk add --no-cache build-base autoconf automake libtool \
+                pkgconf gperf bison flex python3 linux-headers curl xz
+              sh .github/scripts/build-static.sh "$VERSION" dist
+              chown -R "$HOST_IDS" dist build-static
+            '
+
+      - name: Smoke test
+        run: |
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP"
+          charon=$(echo "$RUNNER_TEMP"/strongswan-nekoims-*/libexec/ipsec/charon)
+          file "$charon"
+          if readelf -l "$charon" | grep -q INTERP; then
+            echo "charon is dynamically linked" >&2
+            exit 1
+          fi
+          # Every plugin the dialer loads must resolve from the built-in
+          # table; only the kernel interface may fail without root.
+          printf '%s\n' 'charon {' 'load_modular = no' \
+            'load = random nonce drbg aes sha1 sha2 hmac gmp curve25519 fips-prf kdf x509 pem pubkey pkcs1 constraints kernel-netlink socket-default vici eap-identity eap-aka eap-aka-http p-cscf' \
+            'port = 0' 'port_nat_t = 0' \
+            "plugins { vici { socket = unix://$RUNNER_TEMP/charon.vici } }" \
+            'filelog { stderr { default = 2 } }' '}' > "$RUNNER_TEMP/test.conf"
+          STRONGSWAN_CONF="$RUNNER_TEMP/test.conf" timeout 5 "$charon" \
+            > "$RUNNER_TEMP/charon.log" 2>&1 || true
+          cat "$RUNNER_TEMP/charon.log"
+          for p in eap-aka eap-aka-http p-cscf vici gmp fips-prf; do
+            grep -q "plugin '$p': loaded successfully" "$RUNNER_TEMP/charon.log"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strongswan-nekoims-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes "Static monolithic charon (musl) for the NekoIMS ePDG dialer, built from ${GITHUB_SHA}. Extract into /usr/local or pass --charon <dir>/libexec/ipsec/charon to dialers/strongswan-dialer.py; lib/python holds the vici client."
+          fi
