@@ -24,10 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # baseline: oldest CPU model the binary must run on, checked with
+          # qemu-user since the runners have every extension (e.g. ADX)
           - arch: x86_64
             runner: ubuntu-24.04
+            qemu: qemu-x86_64
+            baseline: Nehalem
           - arch: arm64
             runner: ubuntu-24.04-arm
+            qemu: qemu-aarch64
+            baseline: cortex-a53
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +60,12 @@ jobs:
               sh .github/scripts/build-static.sh "$VERSION" dist
               chown -R "$HOST_IDS" dist build-static
             '
+
+      - name: Baseline CPU check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          ${{ matrix.qemu }} -cpu ${{ matrix.baseline }} build-static/gmp-check
 
       - name: Smoke test
         run: |

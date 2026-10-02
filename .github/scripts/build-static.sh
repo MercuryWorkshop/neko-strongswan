@@ -37,11 +37,46 @@ if [ ! -f "$GMP/lib/libgmp.a" ]; then
 	echo "$GMP_SHA256  gmp-$GMP_VERSION.tar.xz" | sha256sum -c -
 	tar xf "gmp-$GMP_VERSION.tar.xz"
 	cd "gmp-$GMP_VERSION"
+	# GMP's config.guess picks assembly for the exact build CPU (e.g. ADX on
+	# CI runners, SIGILL on Haswell). configfsf.guess gives the plain
+	# triplet; on x86_64 a fat build dispatches per CPU at runtime instead.
+	GMP_TRIPLET=$(sh ./configfsf.guess)
+	GMP_FAT=
+	case $GMP_TRIPLET in
+		x86_64-*|i?86-*) GMP_FAT=--enable-fat ;;
+	esac
 	./configure --prefix="$GMP" --disable-shared --enable-static --with-pic \
+		--build="$GMP_TRIPLET" --host="$GMP_TRIPLET" $GMP_FAT \
 		CFLAGS="-O2 -std=gnu17"
 	make -j"$JOBS"
 	make install
 fi
+
+# 2048-bit powm like MODP_2048 DH, for CI to run on a baseline CPU model
+cat > "$WORK/gmp-check.c" <<'EOF'
+#include <stdio.h>
+#include <gmp.h>
+
+int main(void)
+{
+	mpz_t b, e, m, r;
+	gmp_randstate_t st;
+
+	gmp_randinit_default(st);
+	mpz_inits(b, e, m, r, NULL);
+	mpz_urandomb(m, st, 2048);
+	mpz_setbit(m, 2047);
+	mpz_setbit(m, 0);
+	mpz_urandomb(b, st, 2048);
+	mpz_urandomb(e, st, 2048);
+	mpz_powm(r, b, e, m);
+	printf("gmp powm ok\n");
+	return 0;
+}
+EOF
+${CC:-cc} -static -O2 -I"$GMP/include" "$WORK/gmp-check.c" \
+	"$GMP/lib/libgmp.a" -o "$WORK/gmp-check"
+"$WORK/gmp-check"
 
 # -- charon ------------------------------------------------------------------
 
