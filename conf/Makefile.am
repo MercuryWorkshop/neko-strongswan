@@ -44,6 +44,7 @@ plugins = \
 	plugins/eap-aka.opt \
 	plugins/eap-aka-3gpp.opt \
 	plugins/eap-aka-3gpp2.opt \
+	plugins/eap-aka-http.opt \
 	plugins/eap-dynamic.opt \
 	plugins/eap-gtc.opt \
 	plugins/eap-peap.opt \

@@ -30,7 +30,20 @@ struct private_eap_sim_pcsc_card_t {
 	 */
 	eap_sim_pcsc_card_t public;
 
+	/**
+	 * RAND of the last synchronization failure
+	 */
+	char auts_rand[AKA_RAND_LEN];
+
+	/**
+	 * AUTS of the last synchronization failure
+	 */
 	char auts[AKA_AUTS_LEN];
+
+	/**
+	 * Whether auts/auts_rand are set
+	 */
+	bool have_auts;
 };
 
 /**
@@ -601,6 +614,8 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 				continue;
 			}
 			memcpy(this->auts, pbRecvBuffer + 2, AKA_AUTS_LEN);
+			memcpy(this->auts_rand, rand, AKA_RAND_LEN);
+			this->have_auts = TRUE;
 			DBG1(DBG_IKE, "Sync failure, storing AUTS %b", this->auts, AKA_AUTS_LEN);
 			/* This result code will trigger resync() function */
 			found = INVALID_STATE;
@@ -618,7 +633,7 @@ METHOD(simaka_card_t, get_quintuplet, status_t,
 			memcpy(res, pbRecvBuffer + 2, *res_len);
 			memcpy(ck, pbRecvBuffer + 2 + *res_len + 1, AKA_CK_LEN);
 			memcpy(ik, pbRecvBuffer + 2 + *res_len + 1 + AKA_CK_LEN + 1, AKA_IK_LEN);
-			DBG1(DBG_IKE, "Authentication success:\nRES %b\ncK %b\niK %b", res, *res_len, ck,
+			DBG4(DBG_IKE, "Authentication success:\nRES %b\ncK %b\niK %b", res, *res_len, ck,
 			     AKA_CK_LEN, ik, AKA_IK_LEN);
 			found = SUCCESS;
 			continue;
@@ -660,8 +675,14 @@ METHOD(simaka_card_t, resync, bool,
 	private_eap_sim_pcsc_card_t *this, identification_t *id,
 	char rand[AKA_RAND_LEN], char auts[AKA_AUTS_LEN])
 {
-	/* AUTS */
+	/* only answer for the challenge that failed on this card, other cards
+	 * may have produced the AUTS */
+	if (!this->have_auts || !memeq(this->auts_rand, rand, AKA_RAND_LEN))
+	{
+		return FALSE;
+	}
 	memcpy(auts, this->auts, AKA_AUTS_LEN);
+	this->have_auts = FALSE;
 	DBG3(DBG_IKE, "using AUTS:\n%b", auts, AKA_AUTS_LEN);
 
 	return TRUE;

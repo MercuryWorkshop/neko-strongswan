@@ -187,6 +187,7 @@ ARG_ENABL_SET([coupling],       [enable IKEv2 plugin to couple peer certificates
 ARG_ENABL_SET([dnscert],        [enable DNSCERT authentication plugin.])
 ARG_ENABL_SET([eap-sim],        [enable SIM authentication module for EAP.])
 ARG_ENABL_SET([eap-sim-file],   [enable EAP-SIM backend based on a triplet file.])
+ARG_ENABL_SET([eap-aka-http],   [enable EAP-AKA backend querying a USIM-https-server compatible HTTP service, e.g. the NekoIMS simcard-server.])
 ARG_ENABL_SET([eap-sim-pcsc],   [enable EAP-SIM backend based on a smartcard reader. Requires libpcsclite.])
 ARG_ENABL_SET([eap-aka],        [enable EAP AKA authentication module.])
 ARG_ENABL_SET([eap-aka-3gpp],   [enable EAP AKA backend implementing 3GPP MILENAGE algorithms in software.])
@@ -1531,6 +1532,7 @@ ADD_PLUGIN([updown],               [c charon])
 ADD_PLUGIN([eap-identity],         [c charon nm cmd])
 ADD_PLUGIN([eap-sim],              [c charon])
 ADD_PLUGIN([eap-sim-file],         [c charon])
+ADD_PLUGIN([eap-aka-http],         [c charon])
 ADD_PLUGIN([eap-sim-pcsc],         [c charon])
 ADD_PLUGIN([eap-aka],              [c charon])
 ADD_PLUGIN([eap-aka-3gpp],         [c charon])
@@ -1681,6 +1683,7 @@ AM_CONDITIONAL(USE_COUPLING, test x$coupling = xtrue)
 AM_CONDITIONAL(USE_RADATTR, test x$radattr = xtrue)
 AM_CONDITIONAL(USE_EAP_SIM, test x$eap_sim = xtrue)
 AM_CONDITIONAL(USE_EAP_SIM_FILE, test x$eap_sim_file = xtrue)
+AM_CONDITIONAL(USE_EAP_AKA_HTTP, test x$eap_aka_http = xtrue)
 AM_CONDITIONAL(USE_EAP_SIM_PCSC, test x$eap_sim_pcsc = xtrue)
 AM_CONDITIONAL(USE_EAP_SIMAKA_SQL, test x$eap_simaka_sql = xtrue)
 AM_CONDITIONAL(USE_EAP_SIMAKA_PSEUDONYM, test x$eap_simaka_pseudonym = xtrue)
@@ -1971,6 +1974,7 @@ AC_CONFIG_FILES([
 	src/libcharon/plugins/eap_gtc/Makefile
 	src/libcharon/plugins/eap_sim/Makefile
 	src/libcharon/plugins/eap_sim_file/Makefile
+	src/libcharon/plugins/eap_aka_http/Makefile
 	src/libcharon/plugins/eap_sim_pcsc/Makefile
 	src/libcharon/plugins/eap_simaka_sql/Makefile
 	src/libcharon/plugins/eap_simaka_pseudonym/Makefile

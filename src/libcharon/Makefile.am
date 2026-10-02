@@ -348,6 +348,13 @@ if MONOLITHIC
 endif
 endif
 
+if USE_EAP_AKA_HTTP
+  SUBDIRS += plugins/eap_aka_http
+if MONOLITHIC
+  libcharon_la_LIBADD += plugins/eap_aka_http/libstrongswan-eap-aka-http.la
+endif
+endif
+
 if USE_EAP_SIM_PCSC
   SUBDIRS += plugins/eap_sim_pcsc
 if MONOLITHIC
