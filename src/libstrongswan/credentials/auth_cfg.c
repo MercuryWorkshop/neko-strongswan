@@ -36,6 +36,7 @@ ENUM(auth_class_names, AUTH_CLASS_ANY, AUTH_CLASS_XAUTH,
 ENUM(auth_rule_names, AUTH_RULE_IDENTITY, AUTH_HELPER_AC_CERT,
 	"RULE_IDENTITY",
 	"RULE_IDENTITY_LOOSE",
+	"RULE_IDENTITY_UNCHECKED",
 	"RULE_AUTH_CLASS",
 	"RULE_AAA_IDENTITY",
 	"RULE_EAP_IDENTITY",
@@ -67,6 +68,7 @@ ENUM(auth_rule_names, AUTH_RULE_IDENTITY, AUTH_HELPER_AC_CERT,
 ENUM(auth_rule_names_lower, AUTH_RULE_IDENTITY, AUTH_HELPER_AC_CERT,
 	"identity",
 	"identity_loose",
+	"identity_unchecked",
 	"auth_class",
 	"aaa_identity",
 	"eap_identity",
@@ -107,6 +109,7 @@ static inline bool is_multi_value_rule(auth_rule_t type)
 		case AUTH_RULE_EAP_VENDOR:
 		case AUTH_RULE_IDENTITY:
 		case AUTH_RULE_IDENTITY_LOOSE:
+		case AUTH_RULE_IDENTITY_UNCHECKED:
 		case AUTH_RULE_EAP_IDENTITY:
 		case AUTH_RULE_AAA_IDENTITY:
 		case AUTH_RULE_XAUTH_IDENTITY:
@@ -240,6 +243,7 @@ static void init_entry(entry_t *this, auth_rule_t type, va_list args)
 	switch (type)
 	{
 		case AUTH_RULE_IDENTITY_LOOSE:
+		case AUTH_RULE_IDENTITY_UNCHECKED:
 		case AUTH_RULE_AUTH_CLASS:
 		case AUTH_RULE_EAP_TYPE:
 		case AUTH_RULE_EAP_VENDOR:
@@ -291,6 +295,7 @@ static bool entry_equals(entry_t *e1, entry_t *e2)
 	switch (e1->type)
 	{
 		case AUTH_RULE_IDENTITY_LOOSE:
+		case AUTH_RULE_IDENTITY_UNCHECKED:
 		case AUTH_RULE_AUTH_CLASS:
 		case AUTH_RULE_EAP_TYPE:
 		case AUTH_RULE_EAP_VENDOR:
@@ -394,6 +399,7 @@ static void destroy_entry_value(entry_t *entry)
 			break;
 		}
 		case AUTH_RULE_IDENTITY_LOOSE:
+		case AUTH_RULE_IDENTITY_UNCHECKED:
 		case AUTH_RULE_AUTH_CLASS:
 		case AUTH_RULE_EAP_TYPE:
 		case AUTH_RULE_EAP_VENDOR:
@@ -425,6 +431,7 @@ static void replace(private_auth_cfg_t *this, entry_enumerator_t *enumerator,
 		switch (type)
 		{
 			case AUTH_RULE_IDENTITY_LOOSE:
+			case AUTH_RULE_IDENTITY_UNCHECKED:
 			case AUTH_RULE_AUTH_CLASS:
 			case AUTH_RULE_EAP_TYPE:
 			case AUTH_RULE_EAP_VENDOR:
@@ -514,6 +521,7 @@ METHOD(auth_cfg_t, get, void*,
 		case AUTH_RULE_OCSP_VALIDATION:
 			return (void*)VALIDATION_FAILED;
 		case AUTH_RULE_IDENTITY_LOOSE:
+		case AUTH_RULE_IDENTITY_UNCHECKED:
 		case AUTH_RULE_CERT_VALIDATION_SUSPENDED:
 			return (void*)FALSE;
 		case AUTH_RULE_IDENTITY:
@@ -960,6 +968,13 @@ METHOD(auth_cfg_t, complies, bool,
 				id2 = get(this, t1);
 				if (!id2 || !id2->matches(id2, id1))
 				{
+					if (t1 == AUTH_RULE_IDENTITY && id2 &&
+						constraints->get(constraints, AUTH_RULE_IDENTITY_UNCHECKED))
+					{
+						DBG1(DBG_CFG, "accepting identity '%Y' instead of the "
+							 "requested '%Y'", id2, id1);
+						break;
+					}
 					if (t1 == AUTH_RULE_IDENTITY &&
 						constraints->get(constraints, AUTH_RULE_IDENTITY_LOOSE))
 					{	/* also verify identity against subjectAltNames */
@@ -1104,6 +1119,7 @@ METHOD(auth_cfg_t, complies, bool,
 				break;
 			}
 			case AUTH_RULE_IDENTITY_LOOSE:
+			case AUTH_RULE_IDENTITY_UNCHECKED:
 				/* just an indication when verifying AUTH_RULE_IDENTITY */
 			case AUTH_RULE_XAUTH_BACKEND:
 				/* not enforced, just a hint for local authentication */
@@ -1250,6 +1266,7 @@ static void merge(private_auth_cfg_t *this, private_auth_cfg_t *other, bool copy
 					break;
 				}
 				case AUTH_RULE_IDENTITY_LOOSE:
+				case AUTH_RULE_IDENTITY_UNCHECKED:
 				case AUTH_RULE_CRL_VALIDATION:
 				case AUTH_RULE_OCSP_VALIDATION:
 				case AUTH_RULE_AUTH_CLASS:
@@ -1427,6 +1444,7 @@ METHOD(auth_cfg_t, clone_, auth_cfg_t*,
 				break;
 			}
 			case AUTH_RULE_IDENTITY_LOOSE:
+			case AUTH_RULE_IDENTITY_UNCHECKED:
 			case AUTH_RULE_AUTH_CLASS:
 			case AUTH_RULE_EAP_TYPE:
 			case AUTH_RULE_EAP_VENDOR:

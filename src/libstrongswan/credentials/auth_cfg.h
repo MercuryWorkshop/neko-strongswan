@@ -71,6 +71,10 @@ enum auth_rule_t {
 	/** if TRUE don't send IDr as initiator, but verify the identity after
 	 * receiving IDr (but also verify it against subjectAltNames), bool */
 	AUTH_RULE_IDENTITY_LOOSE,
+	/** if TRUE send IDr as initiator, but accept any identity the responder
+	 * uses (e.g. the APN towards a 3GPP ePDG, RFC 5998 EAP-only peers
+	 * are authenticated by the EAP MSK instead), bool */
+	AUTH_RULE_IDENTITY_UNCHECKED,
 	/** authentication class, auth_class_t */
 	AUTH_RULE_AUTH_CLASS,
 	/** AAA-backend identity for EAP methods supporting it, identification_t* */

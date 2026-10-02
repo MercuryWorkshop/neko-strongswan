@@ -546,6 +546,17 @@ connections.<conn>.remote<suffix>.id = %any
 	_email:^(moon|sun)@strongswan\.org$_, _fqdn:^vpn[0-9]+\.strongswan\.org$_,
 	_"asn1dn:^.*CN=.+\\.strongswan\\.org$"_.
 
+connections.<conn>.remote<suffix>.id_check = yes
+	Whether the identity the remote peer uses must match _id_.
+
+	If disabled, an initiator still sends _id_ as IDr, but accepts any
+	identity the responder authenticates with. This is meant for peers that use
+	IDr as a selector rather than as their identity, e.g. a 3GPP ePDG that
+	expects the APN in IDr (TS 24.302 7.2.2) but identifies as one of its
+	nodes. Only disable it if the peer is authenticated by other means, like
+	the MSK of a mutual EAP-only authentication (RFC 5998) or a certificate
+	constrained via _cacerts_.
+
 connections.<conn>.remote<suffix>.eap_id = id
 	Use EAP-Identity method to request an identity from the client to match
 	against and use during EAP authentication.

@@ -1719,6 +1719,25 @@ CALLBACK(parse_revocation, bool,
 }
 
 /**
+ * Parse id_check, adding AUTH_RULE_IDENTITY_UNCHECKED if disabled
+ */
+CALLBACK(parse_id_check, bool,
+	auth_cfg_t *cfg, chunk_t v)
+{
+	bool check;
+
+	if (!parse_bool(&check, v))
+	{
+		return FALSE;
+	}
+	if (!check)
+	{
+		cfg->add(cfg, AUTH_RULE_IDENTITY_UNCHECKED, TRUE);
+	}
+	return TRUE;
+}
+
+/**
  * Parse list items to comma separated strings
  */
 CALLBACK(parse_stringlist, bool,
@@ -1996,6 +2015,7 @@ CALLBACK(auth_kv, bool,
 	parse_rule_t rules[] = {
 		{ "auth",			parse_auth,			auth->cfg					},
 		{ "id",				parse_ike_id,		auth->cfg					},
+		{ "id_check",		parse_id_check,		auth->cfg					},
 		{ "ca_id",			parse_ca_id,		auth->cfg					},
 		{ "aaa_id",			parse_aaa_id,		auth->cfg					},
 		{ "eap_id",			parse_eap_id,		auth->cfg					},
