@@ -52,6 +52,11 @@ struct private_kernel_iph_net_t {
 	HANDLE changes;
 
 	/**
+	 * Whether to install virtual IPs, which we can't
+	 */
+	bool install_virtual_ip;
+
+	/**
 	 * EnableRouter() OVERLAPPED
 	 */
 	OVERLAPPED router;
@@ -613,14 +618,17 @@ METHOD(kernel_net_t, add_ip, status_t,
 	private_kernel_iph_net_t *this, host_t *virtual_ip, int prefix,
 	char *iface_name)
 {
-	return NOT_SUPPORTED;
+	/* as with kernel-netlink: with install_virtual_ip = no, something else
+	 * (e.g. the NekoIMS dialer on its Wintun adapter) puts the address on an
+	 * interface, but the IKE_SA still has to use it for traffic selectors */
+	return this->install_virtual_ip ? NOT_SUPPORTED : SUCCESS;
 }
 
 METHOD(kernel_net_t, del_ip, status_t,
 	private_kernel_iph_net_t *this, host_t *virtual_ip, int prefix,
 	bool wait)
 {
-	return NOT_SUPPORTED;
+	return this->install_virtual_ip ? NOT_SUPPORTED : SUCCESS;
 }
 
 /**
@@ -768,6 +776,8 @@ kernel_iph_net_t *kernel_iph_net_create()
 		},
 		.mutex = mutex_create(MUTEX_TYPE_DEFAULT),
 		.ifaces = linked_list_create(),
+		.install_virtual_ip = lib->settings->get_bool(lib->settings,
+						"%s.install_virtual_ip", TRUE, lib->ns),
 	);
 	/* PIPINTERFACE_CHANGE_CALLBACK is not using WINAPI in MinGW, which seems
 	 * to be wrong. Force a cast to our WINAPI call */

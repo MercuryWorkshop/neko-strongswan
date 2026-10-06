@@ -18,9 +18,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef WIN32
+/* AF_UNIX stream sockets, Windows 10 1803 and later */
+#include <afunix.h>
+#else
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#endif
 
 #include <daemon.h>
 #include <threading/mutex.h>
@@ -141,11 +146,26 @@ static bool parse_server(private_eap_aka_http_card_t *this, char *server)
 }
 
 /**
+ * Set the send/receive timeouts of a socket
+ */
+static void set_timeouts(private_eap_aka_http_card_t *this, int fd)
+{
+#ifdef WIN32
+	/* milliseconds as a DWORD instead of a timeval */
+	DWORD tv = this->timeout * 1000;
+#else
+	struct timeval tv = { .tv_sec = this->timeout };
+#endif
+
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+/**
  * Connect to the configured server, returns -1 on error
  */
 static int connect_server(private_eap_aka_http_card_t *this)
 {
-	struct timeval tv = { .tv_sec = this->timeout };
 	host_t *host = NULL;
 	int fd;
 
@@ -164,8 +184,7 @@ static int connect_server(private_eap_aka_http_card_t *this)
 		{
 			return -1;
 		}
-		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		set_timeouts(this, fd);
 		if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
 		{
 			return fd;
@@ -185,8 +204,7 @@ static int connect_server(private_eap_aka_http_card_t *this)
 	fd = socket(host->get_family(host), SOCK_STREAM, 0);
 	if (fd >= 0)
 	{
-		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		set_timeouts(this, fd);
 		if (connect(fd, host->get_sockaddr(host),
 					*host->get_sockaddr_len(host)) != 0)
 		{

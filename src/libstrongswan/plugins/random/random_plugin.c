@@ -79,6 +79,7 @@ bool random_plugin_get_strong_equals_true()
 	return strong_equals_true;
 }
 
+#ifndef WIN32
 /**
  * Open a random device file
  */
@@ -97,6 +98,7 @@ static bool open_dev(char *file, int *fd)
 	}
 	return TRUE;
 }
+#endif /* !WIN32 */
 
 METHOD(plugin_t, get_name, char*,
 	private_random_plugin_t *this)
@@ -119,6 +121,7 @@ METHOD(plugin_t, get_features, int,
 METHOD(plugin_t, destroy, void,
 	private_random_plugin_t *this)
 {
+#ifndef WIN32
 	if (dev_random != -1)
 	{
 		close(dev_random);
@@ -127,6 +130,7 @@ METHOD(plugin_t, destroy, void,
 	{
 		close(dev_urandom);
 	}
+#endif
 	free(this);
 }
 
@@ -136,7 +140,9 @@ METHOD(plugin_t, destroy, void,
 PLUGIN_DEFINE(random)
 {
 	private_random_plugin_t *this;
+#ifndef WIN32
 	char *urandom_file, *random_file;
+#endif
 
 	INIT(this,
 		.public = {
@@ -150,6 +156,7 @@ PLUGIN_DEFINE(random)
 
 	strong_equals_true = lib->settings->get_bool(lib->settings,
 						"%s.plugins.random.strong_equals_true", FALSE, lib->ns);
+#ifndef WIN32
 	urandom_file = lib->settings->get_str(lib->settings,
 						"%s.plugins.random.urandom", DEV_URANDOM, lib->ns);
 	random_file = lib->settings->get_str(lib->settings,
@@ -160,6 +167,7 @@ PLUGIN_DEFINE(random)
 		destroy(this);
 		return NULL;
 	}
+#endif /* Windows has no devices, random_rng.c uses BCryptGenRandom() */
 
 	return &this->public.plugin;
 }

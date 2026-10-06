@@ -73,10 +73,12 @@ struct private_kernel_libipsec_router_t {
 	 */
 	rwlock_t *lock;
 
+#ifndef WIN32
 	/**
 	 * Pipe to signal handle_plain() about changes regarding TUN devices
 	 */
 	int notify[2];
+#endif
 
 	/**
 	 * ESP handler to send raw ESP packets
@@ -139,6 +141,37 @@ CALLBACK(deliver_plain, void,
 	this->lock->unlock(this->lock);
 	packet->destroy(packet);
 }
+
+#ifdef WIN32
+
+/**
+ * Job handling outbound plaintext packets. There is no poll() for Wintun,
+ * read_packet() blocks (cancellably) on the default device instead; the
+ * per-VIP devices are only created by kernel interfaces on other platforms.
+ */
+static job_requeue_t handle_plain(private_kernel_libipsec_router_t *this)
+{
+	chunk_t raw;
+	ip_packet_t *packet;
+
+	if (!this->tun.tun->read_packet(this->tun.tun, &raw))
+	{	/* e.g. the adapter was removed, don't spin */
+		sleep(1);
+		return JOB_REQUEUE_FAIR;
+	}
+	packet = ip_packet_create(raw);
+	if (packet)
+	{
+		ipsec->processor->queue_outbound(ipsec->processor, packet);
+	}
+	else
+	{
+		DBG1(DBG_KNL, "invalid IP packet read from TUN device");
+	}
+	return JOB_REQUEUE_DIRECT;
+}
+
+#else /* !WIN32 */
 
 /**
  * Read and process outbound plaintext packet for the given TUN device
@@ -250,11 +283,15 @@ static job_requeue_t handle_plain(private_kernel_libipsec_router_t *this)
 	return JOB_REQUEUE_DIRECT;
 }
 
+#endif /* !WIN32 */
+
 METHOD(kernel_listener_t, tun, bool,
 	private_kernel_libipsec_router_t *this, tun_device_t *tun, bool created)
 {
 	tun_entry_t *entry, lookup;
+#ifndef WIN32
 	char buf[] = {0x01};
+#endif
 
 	this->lock->write_lock(this->lock);
 	if (created)
@@ -272,8 +309,13 @@ METHOD(kernel_listener_t, tun, bool,
 		entry = this->tuns->remove(this->tuns, &lookup);
 		free(entry);
 	}
+#ifdef WIN32
+	DBG1(DBG_KNL, "TUN devices per virtual IP are not supported on Windows, "
+		 "%s is not read", tun->get_name(tun));
+#else
 	/* notify handler thread to recreate FD set */
 	ignore_result(write(this->notify[1], buf, sizeof(buf)));
+#endif
 	this->lock->unlock(this->lock);
 	return TRUE;
 }
@@ -308,12 +350,15 @@ METHOD(kernel_libipsec_router_t, destroy, void,
 	charon->kernel->remove_listener(charon->kernel, &this->public.listener);
 	this->lock->destroy(this->lock);
 	this->tuns->destroy(this->tuns);
+#ifndef WIN32
 	close(this->notify[0]);
 	close(this->notify[1]);
+#endif
 	router = NULL;
 	free(this);
 }
 
+#ifndef WIN32
 /**
  * Set O_NONBLOCK on the given socket.
  */
@@ -322,6 +367,7 @@ static bool set_nonblock(int socket)
 	int flags = fcntl(socket, F_GETFL);
 	return flags != -1 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) != -1;
 }
+#endif
 
 /*
  * See header file
@@ -344,6 +390,7 @@ kernel_libipsec_router_t *kernel_libipsec_router_create()
 		.esp_handler = lib->get(lib, "kernel-libipsec-esp-handler"),
 	);
 
+#ifndef WIN32
 	if (pipe(this->notify) != 0 ||
 		!set_nonblock(this->notify[0]) || !set_nonblock(this->notify[1]))
 	{
@@ -351,6 +398,7 @@ kernel_libipsec_router_t *kernel_libipsec_router_create()
 		free(this);
 		return NULL;
 	}
+#endif
 
 	this->tun.fd = this->tun.tun->get_fd(this->tun.tun);
 

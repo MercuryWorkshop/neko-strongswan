@@ -20,6 +20,10 @@
 #include <errno.h>
 #include <utils/debug.h>
 
+#ifdef WIN32
+#include <bcrypt.h>
+#endif
+
 #include "random_rng.h"
 #include "random_plugin.h"
 
@@ -40,6 +44,36 @@ struct private_random_rng_t {
 	 */
 	int fd;
 };
+
+#ifdef WIN32
+
+/**
+ * The system's preferred CSPRNG, for every quality: Windows has no
+ * /dev/random distinction, and no RNG plugin without OpenSSL otherwise
+ */
+METHOD(rng_t, get_bytes, bool,
+	private_random_rng_t *this, size_t bytes, uint8_t *buffer)
+{
+	ULONG len;
+	NTSTATUS status;
+
+	while (bytes)
+	{
+		len = min(bytes, (ULONG)-1);
+		status = BCryptGenRandom(NULL, buffer, len,
+								 BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+		if (!BCRYPT_SUCCESS(status))
+		{
+			DBG1(DBG_LIB, "BCryptGenRandom() failed: 0x%08lx", status);
+			return FALSE;
+		}
+		buffer += len;
+		bytes -= len;
+	}
+	return TRUE;
+}
+
+#else /* !WIN32 */
 
 METHOD(rng_t, get_bytes, bool,
 	private_random_rng_t *this, size_t bytes, uint8_t *buffer)
@@ -64,11 +98,17 @@ METHOD(rng_t, get_bytes, bool,
 	return TRUE;
 }
 
+#endif /* !WIN32 */
+
 METHOD(rng_t, allocate_bytes, bool,
 	private_random_rng_t *this, size_t bytes, chunk_t *chunk)
 {
 	*chunk = chunk_alloc(bytes);
-	get_bytes(this, chunk->len, chunk->ptr);
+	if (!get_bytes(this, chunk->len, chunk->ptr))
+	{
+		chunk_free(chunk);
+		return FALSE;
+	}
 	return TRUE;
 }
 

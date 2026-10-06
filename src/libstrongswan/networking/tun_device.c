@@ -17,6 +17,18 @@
  * for more details.
  */
 
+#ifdef WIN32
+/* Vista, for the iphlpapi.h address and interface functions */
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <winsock2.h>
+#include <ws2ipdef.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#endif
+
 #include "tun_device.h"
 
 #include <utils/debug.h>
@@ -27,7 +39,7 @@
 #if !TARGET_OS_OSX
 #define TUN_DEVICE_NOT_SUPPORTED
 #endif
-#elif !defined(__linux__) && !defined(HAVE_NET_IF_TUN_H)
+#elif !defined(__linux__) && !defined(HAVE_NET_IF_TUN_H) && !defined(WIN32)
 #define TUN_DEVICE_NOT_SUPPORTED
 #endif
 
@@ -37,6 +49,457 @@ tun_device_t *tun_device_create(const char *name_tmpl)
 {
 	DBG1(DBG_LIB, "TUN devices are not supported");
 	return NULL;
+}
+
+#elif defined(WIN32)
+
+/*
+ * Windows has no TUN driver of its own, this uses Wintun
+ * (https://www.wintun.net), loaded at runtime from wintun.dll next to the
+ * executable or in System32. Only the few functions used here are declared,
+ * see wintun.h for their documentation.
+ */
+
+typedef void *WINTUN_ADAPTER_HANDLE;
+typedef void *WINTUN_SESSION_HANDLE;
+
+typedef WINTUN_ADAPTER_HANDLE (WINAPI *WINTUN_CREATE_ADAPTER_FUNC)
+	(LPCWSTR name, LPCWSTR tunnel_type, const GUID *guid);
+typedef WINTUN_ADAPTER_HANDLE (WINAPI *WINTUN_OPEN_ADAPTER_FUNC)(LPCWSTR name);
+typedef void (WINAPI *WINTUN_CLOSE_ADAPTER_FUNC)(WINTUN_ADAPTER_HANDLE adapter);
+typedef void (WINAPI *WINTUN_GET_ADAPTER_LUID_FUNC)
+	(WINTUN_ADAPTER_HANDLE adapter, NET_LUID *luid);
+typedef WINTUN_SESSION_HANDLE (WINAPI *WINTUN_START_SESSION_FUNC)
+	(WINTUN_ADAPTER_HANDLE adapter, DWORD capacity);
+typedef void (WINAPI *WINTUN_END_SESSION_FUNC)(WINTUN_SESSION_HANDLE session);
+typedef HANDLE (WINAPI *WINTUN_GET_READ_WAIT_EVENT_FUNC)
+	(WINTUN_SESSION_HANDLE session);
+typedef BYTE* (WINAPI *WINTUN_RECEIVE_PACKET_FUNC)
+	(WINTUN_SESSION_HANDLE session, DWORD *size);
+typedef void (WINAPI *WINTUN_RELEASE_RECEIVE_PACKET_FUNC)
+	(WINTUN_SESSION_HANDLE session, const BYTE *packet);
+typedef BYTE* (WINAPI *WINTUN_ALLOCATE_SEND_PACKET_FUNC)
+	(WINTUN_SESSION_HANDLE session, DWORD size);
+typedef void (WINAPI *WINTUN_SEND_PACKET_FUNC)
+	(WINTUN_SESSION_HANDLE session, const BYTE *packet);
+
+/**
+ * Ring buffer size per direction, a power of two between 128 KiB and 64 MiB
+ */
+#define WINTUN_RING_CAPACITY 0x400000
+
+#define TUN_DEFAULT_MTU 1500
+
+/**
+ * Longest interface name we accept, Windows allows 255 characters
+ */
+#define TUN_NAME_LEN 128
+
+typedef struct private_tun_device_t private_tun_device_t;
+
+struct private_tun_device_t {
+
+	/**
+	 * Public interface
+	 */
+	tun_device_t public;
+
+	/**
+	 * wintun.dll
+	 */
+	HMODULE dll;
+
+	/**
+	 * Functions resolved from wintun.dll
+	 */
+	struct {
+		WINTUN_CREATE_ADAPTER_FUNC create_adapter;
+		WINTUN_OPEN_ADAPTER_FUNC open_adapter;
+		WINTUN_CLOSE_ADAPTER_FUNC close_adapter;
+		WINTUN_GET_ADAPTER_LUID_FUNC get_adapter_luid;
+		WINTUN_START_SESSION_FUNC start_session;
+		WINTUN_END_SESSION_FUNC end_session;
+		WINTUN_GET_READ_WAIT_EVENT_FUNC get_read_wait_event;
+		WINTUN_RECEIVE_PACKET_FUNC receive_packet;
+		WINTUN_RELEASE_RECEIVE_PACKET_FUNC release_receive_packet;
+		WINTUN_ALLOCATE_SEND_PACKET_FUNC allocate_send_packet;
+		WINTUN_SEND_PACKET_FUNC send_packet;
+	} wt;
+
+	/**
+	 * The Wintun adapter
+	 */
+	WINTUN_ADAPTER_HANDLE adapter;
+
+	/**
+	 * Packet session on the adapter
+	 */
+	WINTUN_SESSION_HANDLE session;
+
+	/**
+	 * Signaled when packets are ready to be received, owned by the session
+	 */
+	HANDLE read_event;
+
+	/**
+	 * LUID of the adapter, for the IP Helper API
+	 */
+	NET_LUID luid;
+
+	/**
+	 * Name of the adapter (its alias, as shown by ipconfig and netsh)
+	 */
+	char if_name[TUN_NAME_LEN];
+
+	/**
+	 * The current MTU
+	 */
+	int mtu;
+
+	/**
+	 * Associated address
+	 */
+	host_t *address;
+
+	/**
+	 * Netmask for address
+	 */
+	uint8_t netmask;
+};
+
+METHOD(tun_device_t, set_address, bool,
+	private_tun_device_t *this, host_t *addr, uint8_t netmask)
+{
+	MIB_UNICASTIPADDRESS_ROW row;
+	DWORD err;
+
+	InitializeUnicastIpAddressEntry(&row);
+	row.InterfaceLuid = this->luid;
+	memcpy(&row.Address, addr->get_sockaddr(addr),
+		   *addr->get_sockaddr_len(addr));
+	row.OnLinkPrefixLength = netmask;
+	row.DadState = IpDadStatePreferred;
+
+	err = CreateUnicastIpAddressEntry(&row);
+	if (err != NO_ERROR && err != ERROR_OBJECT_ALREADY_EXISTS)
+	{
+		DBG1(DBG_LIB, "failed to set address on %s: %lu", this->if_name, err);
+		return FALSE;
+	}
+	DESTROY_IF(this->address);
+	this->address = addr->clone(addr);
+	this->netmask = netmask;
+	return TRUE;
+}
+
+METHOD(tun_device_t, get_address, host_t*,
+	private_tun_device_t *this, uint8_t *netmask)
+{
+	if (netmask && this->address)
+	{
+		*netmask = this->netmask;
+	}
+	return this->address;
+}
+
+METHOD(tun_device_t, up, bool,
+	private_tun_device_t *this)
+{
+	/* a Wintun adapter is up while there is a session on it */
+	return TRUE;
+}
+
+/**
+ * Set the MTU of one IP version of the adapter
+ */
+static bool set_mtu_family(private_tun_device_t *this, int family, int mtu)
+{
+	MIB_IPINTERFACE_ROW row;
+	DWORD err;
+
+	InitializeIpInterfaceEntry(&row);
+	row.Family = family;
+	row.InterfaceLuid = this->luid;
+	err = GetIpInterfaceEntry(&row);
+	if (err == ERROR_NOT_FOUND)
+	{	/* that IP version is disabled on the adapter */
+		return TRUE;
+	}
+	if (err == NO_ERROR)
+	{
+		row.NlMtu = mtu;
+		/* SitePrefixLength must be 0 for IPv4 or SetIpInterfaceEntry() fails */
+		if (family == AF_INET)
+		{
+			row.SitePrefixLength = 0;
+		}
+		err = SetIpInterfaceEntry(&row);
+	}
+	if (err != NO_ERROR)
+	{
+		DBG1(DBG_LIB, "failed to set IPv%d MTU on %s: %lu",
+			 family == AF_INET ? 4 : 6, this->if_name, err);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+METHOD(tun_device_t, set_mtu, bool,
+	private_tun_device_t *this, int mtu)
+{
+	/* IPv6 needs at least 1280, it's disabled on the adapter below that */
+	if (!set_mtu_family(this, AF_INET, mtu) ||
+		(mtu >= 1280 && !set_mtu_family(this, AF_INET6, mtu)))
+	{
+		return FALSE;
+	}
+	this->mtu = mtu;
+	return TRUE;
+}
+
+METHOD(tun_device_t, get_mtu, int,
+	private_tun_device_t *this)
+{
+	return this->mtu > 0 ? this->mtu : TUN_DEFAULT_MTU;
+}
+
+METHOD(tun_device_t, get_name, char*,
+	private_tun_device_t *this)
+{
+	return this->if_name;
+}
+
+METHOD(tun_device_t, get_fd, int,
+	private_tun_device_t *this)
+{
+	/* there is no file descriptor, read_packet() blocks instead */
+	return -1;
+}
+
+METHOD(tun_device_t, write_packet, bool,
+	private_tun_device_t *this, chunk_t packet)
+{
+	BYTE *buf;
+
+	buf = this->wt.allocate_send_packet(this->session, packet.len);
+	if (!buf)
+	{
+		DBG1(DBG_LIB, "failed to write packet to TUN device %s: %lu",
+			 this->if_name, GetLastError());
+		return FALSE;
+	}
+	memcpy(buf, packet.ptr, packet.len);
+	this->wt.send_packet(this->session, buf);
+	return TRUE;
+}
+
+METHOD(tun_device_t, read_packet, bool,
+	private_tun_device_t *this, chunk_t *packet)
+{
+	DWORD len, err;
+	BYTE *buf;
+	bool old;
+
+	while (TRUE)
+	{
+		buf = this->wt.receive_packet(this->session, &len);
+		if (buf)
+		{
+			*packet = chunk_clone(chunk_create(buf, len));
+			this->wt.release_receive_packet(this->session, buf);
+			return TRUE;
+		}
+		err = GetLastError();
+		if (err != ERROR_NO_MORE_ITEMS)
+		{	/* ERROR_HANDLE_EOF if the adapter went away */
+			DBG1(DBG_LIB, "reading from TUN device %s failed: %lu",
+				 this->if_name, err);
+			return FALSE;
+		}
+		/* thread_cancel() queues an APC, which an alertable wait runs */
+		old = thread_cancelability(TRUE);
+		WaitForSingleObjectEx(this->read_event, INFINITE, TRUE);
+		thread_cancelability(old);
+	}
+}
+
+METHOD(tun_device_t, destroy, void,
+	private_tun_device_t *this)
+{
+	if (this->session)
+	{
+		this->wt.end_session(this->session);
+	}
+	if (this->adapter)
+	{	/* removes the adapter if we created it */
+		this->wt.close_adapter(this->adapter);
+	}
+	if (this->dll)
+	{
+		FreeLibrary(this->dll);
+	}
+	DESTROY_IF(this->address);
+	free(this);
+}
+
+/**
+ * Load wintun.dll and resolve its functions
+ */
+static bool load_wintun(private_tun_device_t *this)
+{
+	struct {
+		const char *name;
+		FARPROC *func;
+	} funcs[] = {
+		{ "WintunCreateAdapter", (FARPROC*)&this->wt.create_adapter },
+		{ "WintunOpenAdapter", (FARPROC*)&this->wt.open_adapter },
+		{ "WintunCloseAdapter", (FARPROC*)&this->wt.close_adapter },
+		{ "WintunGetAdapterLUID", (FARPROC*)&this->wt.get_adapter_luid },
+		{ "WintunStartSession", (FARPROC*)&this->wt.start_session },
+		{ "WintunEndSession", (FARPROC*)&this->wt.end_session },
+		{ "WintunGetReadWaitEvent", (FARPROC*)&this->wt.get_read_wait_event },
+		{ "WintunReceivePacket", (FARPROC*)&this->wt.receive_packet },
+		{ "WintunReleaseReceivePacket",
+								(FARPROC*)&this->wt.release_receive_packet },
+		{ "WintunAllocateSendPacket", (FARPROC*)&this->wt.allocate_send_packet },
+		{ "WintunSendPacket", (FARPROC*)&this->wt.send_packet },
+	};
+	int i;
+
+	/* not the working directory or PATH, the DLL loads a kernel driver */
+	this->dll = LoadLibraryExA("wintun.dll", NULL,
+							   LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+							   LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (!this->dll)
+	{
+		DBG1(DBG_LIB, "failed to load wintun.dll (%lu), it has to be next to "
+			 "the executable or in System32", GetLastError());
+		return FALSE;
+	}
+	for (i = 0; i < countof(funcs); i++)
+	{
+		*funcs[i].func = GetProcAddress(this->dll, funcs[i].name);
+		if (!*funcs[i].func)
+		{
+			DBG1(DBG_LIB, "wintun.dll has no %s", funcs[i].name);
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+/**
+ * The same GUID for the same name on every run, so Windows sees the same
+ * network (firewall profile, settings) instead of a new one each time
+ */
+static void name_guid(const char *name, GUID *guid)
+{
+	uint32_t h[4];
+	chunk_t chunk = chunk_from_str((char*)name);
+	int i;
+
+	h[0] = chunk_hash_static_inc(chunk, 0x4e4b4f00);
+	for (i = 1; i < countof(h); i++)
+	{
+		h[i] = chunk_hash_static_inc(chunk, h[i-1]);
+	}
+	memcpy(guid, h, sizeof(*guid));
+	/* RFC 4122 version 4 (random) layout */
+	guid->Data3 = (guid->Data3 & 0x0fff) | 0x4000;
+	guid->Data4[0] = (guid->Data4[0] & 0x3f) | 0x80;
+}
+
+/**
+ * Create the Wintun adapter and start a session on it
+ */
+static bool init_tun(private_tun_device_t *this, const char *name_tmpl)
+{
+	wchar_t wname[TUN_NAME_LEN];
+	char *pos;
+	GUID guid;
+	DWORD err;
+
+	/* "ipsec%d" and the like, there is only ever one of ours */
+	strncpy(this->if_name, name_tmpl ?: "tun%d", sizeof(this->if_name) - 2);
+	pos = strstr(this->if_name, "%d");
+	if (pos)
+	{
+		pos[0] = '0';
+		memmove(pos + 1, pos + 2, strlen(pos + 2) + 1);
+	}
+	if (!MultiByteToWideChar(CP_UTF8, 0, this->if_name, -1, wname,
+							 countof(wname)))
+	{
+		DBG1(DBG_LIB, "invalid TUN device name %s", this->if_name);
+		return FALSE;
+	}
+	if (!load_wintun(this))
+	{
+		return FALSE;
+	}
+
+	/* left behind by a previous run that didn't exit cleanly */
+	this->adapter = this->wt.open_adapter(wname);
+	if (this->adapter)
+	{
+		DBG1(DBG_LIB, "reusing existing Wintun adapter %s", this->if_name);
+	}
+	else
+	{
+		name_guid(this->if_name, &guid);
+		this->adapter = this->wt.create_adapter(wname, L"strongSwan", &guid);
+	}
+	if (!this->adapter)
+	{
+		DBG1(DBG_LIB, "failed to create Wintun adapter %s: %lu",
+			 this->if_name, GetLastError());
+		return FALSE;
+	}
+	this->wt.get_adapter_luid(this->adapter, &this->luid);
+
+	this->session = this->wt.start_session(this->adapter,
+										   WINTUN_RING_CAPACITY);
+	if (!this->session)
+	{
+		err = GetLastError();
+		DBG1(DBG_LIB, "failed to start a session on Wintun adapter %s: %lu%s",
+			 this->if_name, err, err == ERROR_ALREADY_EXISTS ?
+			 " (in use by another process?)" : "");
+		return FALSE;
+	}
+	this->read_event = this->wt.get_read_wait_event(this->session);
+	return TRUE;
+}
+
+/*
+ * Described in header
+ */
+tun_device_t *tun_device_create(const char *name_tmpl)
+{
+	private_tun_device_t *this;
+
+	INIT(this,
+		.public = {
+			.read_packet = _read_packet,
+			.write_packet = _write_packet,
+			.get_mtu = _get_mtu,
+			.set_mtu = _set_mtu,
+			.get_name = _get_name,
+			.get_fd = _get_fd,
+			.set_address = _set_address,
+			.get_address = _get_address,
+			.up = _up,
+			.destroy = _destroy,
+		},
+	);
+
+	if (!init_tun(this, name_tmpl))
+	{
+		destroy(this);
+		return NULL;
+	}
+	DBG1(DBG_LIB, "created TUN device: %s", this->if_name);
+	return &this->public;
 }
 
 #else /* TUN devices supported */

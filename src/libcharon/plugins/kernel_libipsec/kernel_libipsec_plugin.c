@@ -138,7 +138,8 @@ PLUGIN_DEFINE(kernel_libipsec)
 		return NULL;
 	}
 
-	this->tun = tun_device_create("ipsec%d");
+	this->tun = tun_device_create(lib->settings->get_str(lib->settings,
+						"%s.plugins.kernel-libipsec.tun_name", "ipsec%d", lib->ns));
 	if (!this->tun)
 	{
 		DBG1(DBG_KNL, "failed to create TUN device");

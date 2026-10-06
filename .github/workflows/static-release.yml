@@ -96,9 +96,85 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # charon-svc for Windows: cross-compiled with llvm-mingw, kernel-libipsec on
+  # a Wintun adapter (see .github/scripts/build-windows.sh). x86_64 only, the
+  # dialer runs it emulated on arm64 (a clang bug breaks native arm64).
+  build-windows:
+    name: build (windows-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf automake libtool pkgconf             gperf bison flex python3 curl unzip zip xz-utils
+          sh .github/scripts/build-windows.sh             "${{ steps.version.outputs.version }}" ${{ matrix.arch }} dist
+          # stable names for releases/latest/download (start.ps1)
+          cd dist
+          cp strongswan-nekoims-*-windows-${{ matrix.arch }}.zip             windows-strongswan-${{ matrix.arch }}.zip
+          sha256sum windows-strongswan-${{ matrix.arch }}.zip             > windows-strongswan-${{ matrix.arch }}.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strongswan-nekoims-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Every plugin the dialer loads must come up; the runner is elevated, so
+  # kernel-libipsec creates its Wintun adapter too.
+  smoke-windows:
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: strongswan-nekoims-windows-x86_64
+          path: dist
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          Expand-Archive dist/windows-strongswan-x86_64.zip -DestinationPath $env:RUNNER_TEMP
+          $svc = Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter charon-svc.exe | Select-Object -First 1
+          @"
+          charon {
+            load_modular = no
+            load = random nonce drbg aes sha1 sha2 hmac gmp curve25519 fips-prf kdf x509 pem pubkey pkcs1 constraints kernel-iph socket-win kernel-libipsec vici eap-identity eap-aka eap-aka-http p-cscf
+            port = 0
+            port_nat_t = 0
+            plugins { kernel-libipsec { tun_name = NekoIMS-ci } }
+            filelog { stderr { default = 2 } }
+          }
+          "@ | Set-Content "$env:RUNNER_TEMP/test.conf"
+          $env:STRONGSWAN_CONF = "$env:RUNNER_TEMP/test.conf"
+          $p = Start-Process $svc.FullName -PassThru -NoNewWindow `
+            -RedirectStandardError "$env:RUNNER_TEMP/charon.log"
+          Start-Sleep 5
+          Stop-Process $p -Force
+          Get-Content "$env:RUNNER_TEMP/charon.log"
+          foreach ($pl in "eap-aka", "eap-aka-http", "p-cscf", "vici", "gmp", "fips-prf", "kernel-libipsec", "socket-win", "kernel-iph") {
+            if (-not (Select-String -Quiet "plugin '$pl': loaded successfully" "$env:RUNNER_TEMP/charon.log")) {
+              throw "plugin $pl did not load"
+            }
+          }
+
   release:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, build-windows, smoke-windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -116,5 +192,5 @@ jobs:
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
-              --title "$TAG" --notes "Static monolithic charon (musl) for the NekoIMS ePDG dialer, built from ${GITHUB_SHA}. Extract into /usr/local or pass --charon <dir>/libexec/ipsec/charon to dialers/strongswan-dialer.py; lib/python holds the vici client."
+              --title "$TAG" --notes "Static monolithic charon (musl) for the NekoIMS ePDG dialer, built from ${GITHUB_SHA}. Extract into /usr/local or pass --charon <dir>/libexec/ipsec/charon to dialers/strongswan-dialer.py; lib/python holds the vici client. The windows-* zips hold charon-svc.exe with Wintun for the same dialer on Windows (start.ps1)."
           fi
