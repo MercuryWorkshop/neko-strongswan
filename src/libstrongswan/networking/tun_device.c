@@ -431,9 +431,10 @@ METHOD(tun_device_t, write_packet, bool,
 	ssize_t s;
 
 #ifdef __APPLE__
-	/* UTUN's expect the packets to be prepended by a 32-bit protocol number
-	 * instead of parsing the packet again, we assume IPv4 for now */
-	uint32_t proto = htonl(AF_INET);
+	/* UTUN's expect the packets to be prepended by a 32-bit protocol number,
+	 * taken from the IP version (IPv6 written as AF_INET is dropped) */
+	uint32_t proto = htonl(packet.len && (packet.ptr[0] >> 4) == 6 ? AF_INET6
+																   : AF_INET);
 	packet = chunk_cata("cc", chunk_from_thing(proto), packet);
 #endif
 	s = write(this->tunfd, packet.ptr, packet.len);
