@@ -24,7 +24,7 @@
 
 #if defined(__APPLE__)
 #include "TargetConditionals.h"
-#if !TARGET_OS_OSX
+#if !TARGET_OS_OSX && !defined(TUN_DEVICE_UTUN)
 #define TUN_DEVICE_NOT_SUPPORTED
 #endif
 #elif !defined(__linux__) && !defined(HAVE_NET_IF_TUN_H)
