@@ -61,6 +61,11 @@ struct private_kernel_libipsec_ipsec_t {
 	 * Whether UDP encapsulation is required
 	 */
 	bool require_encap;
+
+	/**
+	 * Whether to install routes along policies
+	 */
+	bool install_routes;
 };
 
 typedef struct exclude_route_t exclude_route_t;
@@ -410,7 +415,7 @@ static bool install_route(private_kernel_libipsec_ipsec_t *this,
 	host_t *src_ip;
 	bool is_virtual;
 
-	if (policy->direction != POLICY_OUT)
+	if (policy->direction != POLICY_OUT || !this->install_routes)
 	{
 		this->mutex->unlock(this->mutex);
 		return TRUE;
@@ -718,6 +723,8 @@ kernel_libipsec_ipsec_t *kernel_libipsec_ipsec_create()
 		.allow_peer_ts = lib->settings->get_bool(lib->settings,
 					"%s.plugins.kernel-libipsec.allow_peer_ts", FALSE, lib->ns),
 		.require_encap = !lib->get(lib, "kernel-libipsec-esp-handler"),
+		.install_routes = lib->settings->get_bool(lib->settings,
+					"%s.install_routes", TRUE, lib->ns),
 	);
 
 	ipsec->events->register_listener(ipsec->events, &this->ipsec_listener);
